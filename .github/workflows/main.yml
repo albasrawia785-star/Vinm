@@ -31,6 +31,91 @@ jobs:
           fi
           rm -rf temp_unzip
 
+      - name: Auto-Patch React Code for Capacitor Share & Filesystem
+        run: |
+          echo "البحث عن ملفات الـ React التي تحتوي على دالة النسخ الاحتياطي وحقن كود المشاركة..."
+          
+          # 1. البحث عن الملف الذي يحتوي على نص رسالة النجاح التي ظهرت في الفيديو أو دالة التصدير
+          # مثل "تم تصدير النسخة الاحتياطية" أو "تصدير ومشاركة"
+          TARGET_FILE=$(grep -rlw "تم تصدير" src/ || grep -rlw "تصدير ومشاركة" src/ || grep -rlw "download" src/ | grep -E "\.(js|jsx|ts|tsx)$" | head -n 1)
+          
+          if [ -n "$TARGET_FILE" ]; then
+            echo "تم العثور على ملف الواجهة المستهدف: $TARGET_FILE"
+            
+            # 2. حقن مكاتب الاستيراد الخاصة بكاباسيتور في أعلى الملف المستهدف
+            # سنضيف الاستيراد في السطر الأول للملف
+            sed -i '1s|^|import { Filesystem, Directory } from "@capacitor/filesystem";\nimport { Share } from "@capacitor/share";\nimport { Capacitor } from "@capacitor/core";\n|' "$TARGET_FILE"
+            
+            # 3. صياغة دالة تحويل ومشاركة متطورة ومتوافقة برمجياً مع الأندرويد والويب
+            # سنقوم بحقن دالة مساعدة لتحويل الـ Blob أو رابط التحميل إلى Base64 ومشاركته
+            cat << 'EOF' >> "$TARGET_FILE"
+
+            // دالة مضافة تلقائياً بواسطة الـ Build Pipeline لتسهيل المشاركة على الأندرويد
+            window.handleCapacitorShare = async (blobOrUrl, fallbackFileName) => {
+              try {
+                const fileName = fallbackFileName || `Saydali_Pro_Backup_${Date.now()}.zip`;
+                
+                // تحويل الرابط أو الـ Blob إلى Base64
+                let base64Data = "";
+                if (typeof blobOrUrl === 'string' && blobOrUrl.startsWith('data:')) {
+                  base64Data = blobOrUrl.split(',')[1];
+                } else {
+                  const response = await fetch(blobOrUrl);
+                  const blob = await response.blob();
+                  base64Data = await new Promise((resolve) => {
+                    const reader = new FileReader();
+                    reader.onloadend = () => resolve(reader.result.split(',')[1]);
+                    reader.readAsDataURL(blob);
+                  });
+                }
+
+                if (Capacitor.isNativePlatform()) {
+                  await Filesystem.requestPermissions();
+                  const tempFile = await Filesystem.writeFile({
+                    path: fileName,
+                    data: base64Data,
+                    directory: Directory.Cache
+                  });
+
+                  const canShare = await Share.canShare();
+                  if (canShare.value) {
+                    await Share.share({
+                      title: 'نسخة احتياطية - صيدلي برو',
+                      text: 'ملف النسخة الاحتياطية لقاعدة البيانات.',
+                      url: tempFile.uri,
+                      dialogTitle: 'تصدير ومشاركة النسخة الاحتياطية'
+                    });
+                  } else {
+                    await Filesystem.writeFile({
+                      path: fileName,
+                      data: base64Data,
+                      directory: Directory.Documents
+                    });
+                    alert('تم حفظ الملف في مجلد المستندات Documents بنجاح!');
+                  }
+                } else {
+                  const link = document.createElement('a');
+                  link.href = `data:application/zip;base64,${base64Data}`;
+                  link.download = fileName;
+                  document.body.appendChild(link);
+                  link.click();
+                  document.body.removeChild(link);
+                }
+              } catch (e) {
+                console.error("فشلت عملية المشاركة البرمجية:", e);
+              }
+            };
+            EOF
+
+            # 4. استبدال طريقة التحميل التقليدية (click) باستدعاء الدالة الجديدة التي أنشأناها بالخلفية
+            # هذا التعديل يستهدف السطور التي تقوم بـ click() على روابط التحميل ويجعلها تمر عبر دالتنا الذكية
+            sed -i 's/\([a-zA-Z0-9_]*\)\.click()/if (window.handleCapacitorShare) { window.handleCapacitorShare(\1.href || \1, "Saydali_Pro_Backup.zip"); } else { \0 }/g' "$TARGET_FILE"
+            
+            echo "تمت عملية حقن الكود وتحديث الملف بنجاح!"
+          else
+            echo "تنبيه: لم يتم العثور على ملف يحتوي على نصوص التصدير لتعديله تلقائياً."
+          fi
+
       - name: Deep Clean Environment
         run: |
           # تنظيف شامل للمجلدات والملفات المتعارضة حتى داخل المجلدات الفرعية
@@ -113,4 +198,4 @@ jobs:
         with:
           name: Saydali-Pro-APK
           path: android/app/build/outputs/apk/debug/app-debug.apk
-          overwrite: true # يسمح باستبدال الملف القديم لتجنب تعارض 409 نهائياً
+          overwrite: true
