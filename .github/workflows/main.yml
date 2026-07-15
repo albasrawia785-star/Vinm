@@ -106,18 +106,6 @@ jobs:
         run: |
           cd android
           chmod +x gradlew
-          ./gradlew assembleDebug --no-daemon -Dorg.gradle.project.annotation.useAndroidX=true
-
-      - name: Upload APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: Saydali-Pro-APK
-          path: android/app/build/outputs/apk/debug/app-debug.apk
-
-      - name: Build Android APK
-        run: |
-          cd android
-          chmod +x gradlew
           ./gradlew assembleDebug --no-daemon -Dorg.gradle.project.android.useAndroidX=true
 
       - name: Upload APK
@@ -125,3 +113,4 @@ jobs:
         with:
           name: Saydali-Pro-APK
           path: android/app/build/outputs/apk/debug/app-debug.apk
+          overwrite: true # يسمح باستبدال الملف القديم لتجنب تعارض 409 نهائياً
