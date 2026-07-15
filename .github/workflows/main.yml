@@ -31,79 +31,108 @@ jobs:
           fi
           rm -rf temp_unzip
 
-      - name: Auto-Patch React Code for Capacitor Share & Filesystem
+      - name: Auto-Patch React Code for Capacitor Share & Filesystem (via Node)
         run: |
-          echo "البحث عن ملفات الـ React التي تحتوي على دالة النسخ الاحتياطي وحقن كود المشاركة..."
-          
-          # 1. البحث عن ملف الواجهة الرئيسي
-          TARGET_FILE=$(grep -rlw "تم تصدير" src/ || grep -rlw "تصدير ومشاركة" src/ || grep -rlw "download" src/ | grep -E "\.(js|jsx|ts|tsx)$" | head -n 1)
-          
-          if [ -n "$TARGET_FILE" ]; then
-            echo "تم العثور على ملف الواجهة المستهدف: $TARGET_FILE"
-            
-            # 2. حقن الاستيراد في السطر الأول لملف الـ React
-            sed -i '1s|^|import { Filesystem, Directory } from "@capacitor/filesystem";\nimport { Share } from "@capacitor/share";\nimport { Capacitor } from "@capacitor/core";\n|' "$TARGET_FILE"
-            
-            # 3. كتابة دالة المشاركة الذكية وحقنها في السطر الأخير للملف مباشرة دون استخدام EOF
-            echo "" >> "$TARGET_FILE"
-            echo "window.handleCapacitorShare = async (blobOrUrl, fallbackFileName) => {" >> "$TARGET_FILE"
-            echo "  try {" >> "$TARGET_FILE"
-            echo "    const fileName = fallbackFileName || \`Saydali_Pro_Backup_\${Date.now()}.zip\`;" >> "$TARGET_FILE"
-            echo "    let base64Data = '';" >> "$TARGET_FILE"
-            echo "    if (typeof blobOrUrl === 'string' && blobOrUrl.startsWith('data:')) {" >> "$TARGET_FILE"
-            echo "      base64Data = blobOrUrl.split(',')[1];" >> "$TARGET_FILE"
-            echo "    } else {" >> "$TARGET_FILE"
-            echo "      const response = await fetch(blobOrUrl);" >> "$TARGET_FILE"
-            echo "      const blob = await response.blob();" >> "$TARGET_FILE"
-            echo "      base64Data = await new Promise((resolve) => {" >> "$TARGET_FILE"
-            echo "        const reader = new FileReader();" >> "$TARGET_FILE"
-            echo "        reader.onloadend = () => resolve(reader.result.split(',')[1]);" >> "$TARGET_FILE"
-            echo "        reader.readAsDataURL(blob);" >> "$TARGET_FILE"
-            echo "      });" >> "$TARGET_FILE"
-            echo "    }" >> "$TARGET_FILE"
-            echo "    if (Capacitor.isNativePlatform()) {" >> "$TARGET_FILE"
-            echo "      await Filesystem.requestPermissions();" >> "$TARGET_FILE"
-            echo "      const tempFile = await Filesystem.writeFile({" >> "$TARGET_FILE"
-            echo "        path: fileName," >> "$TARGET_FILE"
-            echo "        data: base64Data," >> "$TARGET_FILE"
-            echo "        directory: Directory.Cache" >> "$TARGET_FILE"
-            echo "      });" >> "$TARGET_FILE"
-            echo "      const canShare = await Share.canShare();" >> "$TARGET_FILE"
-            echo "      if (canShare.value) {" >> "$TARGET_FILE"
-            echo "        await Share.share({" >> "$TARGET_FILE"
-            echo "          title: 'نسخة احتياطية - صيدلي برو'," >> "$TARGET_FILE"
-            echo "          text: 'ملف النسخة الاحتياطية لقاعدة البيانات.'," >> "$TARGET_FILE"
-            echo "          url: tempFile.uri," >> "$TARGET_FILE"
-            echo "          dialogTitle: 'تصدير ومشاركة النسخة الاحتياطية'" >> "$TARGET_FILE"
-            echo "        });" >> "$TARGET_FILE"
-            echo "      } else {" >> "$TARGET_FILE"
-            echo "        await Filesystem.writeFile({" >> "$TARGET_FILE"
-            echo "          path: fileName," >> "$TARGET_FILE"
-            echo "          data: base64Data," >> "$TARGET_FILE"
-            echo "          directory: Directory.Documents" >> "$TARGET_FILE"
-            echo "        });" >> "$TARGET_FILE"
-            echo "        alert('تم حفظ الملف في مجلد المستندات Documents بنجاح!');" >> "$TARGET_FILE"
-            echo "      }" >> "$TARGET_FILE"
-            echo "    } else {" >> "$TARGET_FILE"
-            echo "      const link = document.createElement('a');" >> "$TARGET_FILE"
-            echo "      link.href = \`data:application/zip;base64,\${base64Data}\`;" >> "$TARGET_FILE"
-            echo "      link.download = fileName;" >> "$TARGET_FILE"
-            echo "      document.body.appendChild(link);" >> "$TARGET_FILE"
-            echo "      link.click();" >> "$TARGET_FILE"
-            echo "      document.body.removeChild(link);" >> "$TARGET_FILE"
-            echo "    }" >> "$TARGET_FILE"
-            echo "  } catch (e) {" >> "$TARGET_FILE"
-            echo "    console.error('فشلت عملية المشاركة البرمجية:', e);" >> "$TARGET_FILE"
-            echo "  }" >> "$TARGET_FILE"
-            echo "};" >> "$TARGET_FILE"
+          node -e "
+          const fs = require('fs');
+          const path = require('path');
 
-            # 4. تحويل استدعاءات click() القديمة في الملف لتمر عبر الدالة الجديدة
-            sed -i 's/\([a-zA-Z0-9_]*\)\.click()/if (window.handleCapacitorShare) { window.handleCapacitorShare(\1.href || \1, "Saydali_Pro_Backup.zip"); } else { \0 }/g' "$TARGET_FILE"
-            
-            echo "تمت عملية حقن الكود وتحديث الملف بنجاح!"
-          else
-            echo "تنبيه: لم يتم العثور على ملف يحتوي على نصوص التصدير لتعديله تلقائياً."
-          fi
+          // دالة للبحث عن ملف يحتوي على كلمة معينة في مجلد src
+          function findTargetFile(dir, words) {
+            const files = fs.readdirSync(dir);
+            for (const file of files) {
+              const fullPath = path.join(dir, file);
+              const stat = fs.statSync(fullPath);
+              if (stat.isDirectory()) {
+                const found = findTargetFile(fullPath, words);
+                if (found) return found;
+              } else if (stat.isFile() && /\.(js|jsx|ts|tsx)$/.test(file)) {
+                const content = fs.readFileSync(fullPath, 'utf8');
+                if (words.some(word => content.includes(word))) {
+                  return fullPath;
+                }
+              }
+            }
+            return null;
+          }
+
+          const targetFile = findTargetFile('src', ['تم تصدير', 'تصدير ومشاركة', 'download']);
+
+          if (targetFile) {
+            console.log('Found Target File:', targetFile);
+            let content = fs.readFileSync(targetFile, 'utf8');
+
+            // 1. إضافة مكتبات Capacitor في بداية الملف
+            const imports = 'import { Filesystem, Directory } from \"@capacitor/filesystem\";\nimport { Share } from \"@capacitor/share\";\nimport { Capacitor } from \"@capacitor/core\";\n';
+            content = imports + content;
+
+            // 2. دالة المشاركة الذكية لحقنها في الملف
+            const patchCode = \`
+          window.handleCapacitorShare = async (blobOrUrl, fallbackFileName) => {
+            try {
+              const fileName = fallbackFileName || \\\\'Saydali_Pro_Backup_\\\\' + Date.now() + \\\\'.zip\\\\';
+              let base64Data = '';
+              if (typeof blobOrUrl === 'string' && blobOrUrl.startsWith('data:')) {
+                base64Data = blobOrUrl.split(',')[1];
+              } else {
+                const response = await fetch(blobOrUrl);
+                const blob = await response.blob();
+                base64Data = await new Promise((resolve) => {
+                  const reader = new FileReader();
+                  reader.onloadend = () => resolve(reader.result.split(',')[1]);
+                  reader.readAsDataURL(blob);
+                });
+              }
+              if (Capacitor.isNativePlatform()) {
+                await Filesystem.requestPermissions();
+                const tempFile = await Filesystem.writeFile({
+                  path: fileName,
+                  data: base64Data,
+                  directory: Directory.Cache
+                });
+                const canShare = await Share.canShare();
+                if (canShare.value) {
+                  await Share.share({
+                    title: 'نسخة احتياطية - صيدلي برو',
+                    text: 'ملف النسخة الاحتياطية لقاعدة البيانات.',
+                    url: tempFile.uri,
+                    dialogTitle: 'تصدير ومشاركة النسخة الاحتياطية'
+                  });
+                } else {
+                  await Filesystem.writeFile({
+                    path: fileName,
+                    data: base64Data,
+                    directory: Directory.Documents
+                  });
+                  alert('تم حفظ الملف في مجلد المستندات Documents بنجاح!');
+                }
+              } else {
+                const link = document.createElement('a');
+                link.href = 'data:application/zip;base64,' + base64Data;
+                link.download = fileName;
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+              }
+            } catch (e) {
+              console.error('فشلت عملية المشاركة البرمجية:', e);
+            }
+          };
+          \`;
+
+            content = content + '\\n' + patchCode;
+
+            // 3. استبدال طريقة التحميل التقليدية باستدعاء دالتنا الذكية
+            content = content.replace(/([a-zA-Z0-9_]*)\\.click\\(\\)/g, (match, p1) => {
+              return \`if (window.handleCapacitorShare) { window.handleCapacitorShare(\${p1}.href || \${p1}, \"Saydali_Pro_Backup.zip\"); } else { \${match} }\`;
+            });
+
+            fs.writeFileSync(targetFile, content, 'utf8');
+            console.log('React Code successfully patched!');
+          } else {
+            console.log('No matching file found to patch.');
+          }
+          "
 
       - name: Deep Clean Environment
         run: |
