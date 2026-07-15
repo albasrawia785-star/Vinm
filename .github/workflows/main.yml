@@ -146,16 +146,17 @@ jobs:
         with:
           node-version: '22'
 
-      - name: Install Dependencies
+      - name: Install Project Dependencies
         run: |
           npm install --force
 
+      - name: Install Capacitor Core & Plugins (Before Build)
+        run: |
+          # قمنا بتقديم هذه الخطوة لكي يتمكن المترجم من العثور على المكاتب المحقونة أثناء الـ build
+          npm install @capacitor/core@latest @capacitor/cli@latest @capacitor/android@latest @capacitor/filesystem@latest @capacitor/share@latest --force
+
       - name: Build Web Application
         run: npm run build
-
-      - name: Install Capacitor CLI, Core, Filesystem & Share
-        run: |
-          npm install @capacitor/core@latest @capacitor/cli@latest @capacitor/android@latest @capacitor/filesystem@latest @capacitor/share@latest
 
       - name: Initialize Capacitor Android
         run: |
