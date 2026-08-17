@@ -1,87 +1,61 @@
-name: Patch Uploaded APK
+name: Patch Old APK to Android 15
 
 on:
   workflow_dispatch:
     inputs:
-      tag_name:
-        description: 'Release Tag Name containing the input APK'
+      apk_url:
+        description: 'رابط مباشر لتحميل ملف الـ APK'
         required: true
-      target_sdk:
-        description: 'Target SDK Version'
-        required: false
-        default: '34'
 
 permissions:
   contents: write
 
 jobs:
-  patch:
+  patch-and-update:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout Repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Java & Android Tools
-        uses: actions/setup-java@v4
-        with:
-          distribution: 'zulu'
-          java-version: '17'
-
-      - name: Install Utilities
+      - name: Setup Environment
         run: |
           sudo apt-get update
-          sudo apt-get install -y zipalign apksigner curl
+          sudo apt-get install -y zipalign apksigner python3 default-jdk
           wget -q https://bitbucket.org/iBotPeaches/apktool/downloads/apktool_2.9.3.jar -O apktool.jar
 
-      - name: Download Original APK from Release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Download and Decompile
         run: |
-          TAG="${{ github.event.inputs.tag_name }}"
-          gh release download "$TAG" --pattern "input.apk"
+          curl -L -o input.apk "${{ github.event.inputs.apk_url }}"
+          java -jar apktool.jar d input.apk -o decompiled -f
 
-      - name: Decompile APK
+      - name: Patch Manifest and SDK
         run: |
-          java -jar apktool.jar d input.apk -o decompiled_apk -f
-
-      - name: Apply Modern Compatibility Fixes
-        run: |
-          TARGET_SDK="${{ github.event.inputs.target_sdk }}"
+          # 1. تحديث targetSdkVersion في ملف apktool.yml
+          sed -i "s/targetSdkVersion:.*/targetSdkVersion: '35'/g" decompiled/apktool.yml
           
-          # تعديل targetSdkVersion
-          sed -i "s/targetSdkVersion:.*/targetSdkVersion: '$TARGET_SDK'/g" decompiled_apk/apktool.yml
-          
-          # معالجة android:exported الإلزامية في أندرويد الحديث
+          # 2. إضافة android:exported="true" للمكونات (مطلب أندرويد 12+)
           python3 -c "
           import xml.etree.ElementTree as ET
-          manifest_path = 'decompiled_apk/AndroidManifest.xml'
           ET.register_namespace('android', 'http://schemas.android.com/apk/res/android')
-          tree = ET.parse(manifest_path)
+          tree = ET.parse('decompiled/AndroidManifest.xml')
           root = tree.getroot()
           ns = '{http://schemas.android.com/apk/res/android}'
-          
           for elem in root.findall('.//activity') + root.findall('.//service') + root.findall('.//receiver'):
               if elem.find('intent-filter') is not None:
                   if f'{ns}exported' not in elem.attrib:
                       elem.set(f'{ns}exported', 'true')
-                      
-          tree.write(manifest_path, encoding='utf-8', xml_declaration=True)
+          tree.write('decompiled/AndroidManifest.xml', encoding='utf-8', xml_declaration=True)
           "
 
-      - name: Rebuild APK
+      - name: Rebuild and Sign
         run: |
-          java -jar apktool.jar b decompiled_apk -o unsigned_patched.apk
+          java -jar apktool.jar b decompiled -o unsigned.apk
+          zipalign -v -p 4 unsigned.apk aligned.apk
+          keytool -genkey -v -keystore test.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname 'CN=Android,O=Android,C=US'
+          apksigner sign --ks test.keystore --ks-pass pass:android --key-pass pass:android --out final_patched.apk aligned.apk
 
-      - name: Align & Sign APK
-        run: |
-          zipalign -v -p 4 unsigned_patched.apk aligned.apk
-          keytool -genkey -v -keystore test.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android,O=Android,C=US"
-          apksigner sign --ks test.keystore --ks-pass pass:android --key-pass pass:android --out patched_output.apk aligned.apk
-
-      - name: Upload Patched APK to Release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          TAG="${{ github.event.inputs.tag_name }}"
-          gh release upload "$TAG" patched_output.apk#Modernized-App.apk --clobber
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Modernized-App-Android-15
+          path: final_patched.apk
