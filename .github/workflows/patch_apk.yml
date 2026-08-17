@@ -1,13 +1,13 @@
-name: Patch APK Ultimate Compatibility
+name: Patch APK Bypass 32bit on 64bit
 
 on:
   workflow_dispatch:
     inputs:
       apk_url:
-        description: 'رابط مباشر لـ APK'
+        description: 'رابط APK المباشر'
         required: true
       target_sdk:
-        description: 'Target SDK (35 for Android 15)'
+        description: 'Target SDK (e.g. 35)'
         required: true
         default: '35'
 
@@ -15,32 +15,43 @@ jobs:
   patch:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - name: Checkout Repo
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Install Tools
+      - name: Install Build Tools
         run: |
           sudo apt-get update
           sudo apt-get install -y zipalign apksigner python3
           curl -L -o apktool.jar "https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar"
 
-      - name: Decompile APK
+      - name: Download and Decompile APK
         run: |
           curl -L -o input.apk "${{ github.event.inputs.apk_url }}"
           java -jar apktool.jar d input.apk -o decompiled -f
 
-      - name: Advanced Patching
+      - name: Hack Architecture & Bypass 64-bit Check
         run: |
           TARGET_SDK="${{ github.event.inputs.target_sdk }}"
           
-          # 1. تحديث SDK في apktool.yml
+          # 1. ضبط إعدادات الـ SDK لنسخ أندرويد الحديثة
           sed -i "s/targetSdkVersion:.*/targetSdkVersion: '$TARGET_SDK'/g" decompiled/apktool.yml
           sed -i "s/minSdkVersion:.*/minSdkVersion: '21'/g" decompiled/apktool.yml
           
-          # 2. حقن التوافق في AndroidManifest.xml (استخدام Python للتعامل مع الـ XML)
+          # 2. حيلة المعمارية: إنشاء مجلد arm64 وهمي إذا كان التطبيق 32-bit فقط
+          if [ -d "decompiled/lib/armeabi-v7a" ] && [ ! -d "decompiled/lib/arm64-v8a" ]; then
+            echo "Bypassing 32-bit restriction by creating arm64 mapping..."
+            mkdir -p decompiled/lib/arm64-v8a
+            # نسخ المكتبات مع الحفاظ على التوافق لخداع الـ PackageInstaller
+            cp -r decompiled/lib/armeabi-v7a/* decompiled/lib/arm64-v8a/ || true
+          fi
+
+          # 3. تعديل شامل وصارم لملف AndroidManifest.xml
           python3 -c "
           import xml.etree.ElementTree as ET
           ET.register_namespace('android', 'http://schemas.android.com/apk/res/android')
@@ -48,36 +59,36 @@ jobs:
           root = tree.getroot()
           ns = '{http://schemas.android.com/apk/res/android}'
           
-          # إضافة Request Legacy Storage (مهم جداً لأندرويد 11+)
-          if root.get(f'{ns}requestLegacyExternalStorage') is None:
-              root.set(f'{ns}requestLegacyExternalStorage', 'true')
-          if root.get(f'{ns}preserveLegacyExternalStorage') is None:
-              root.set(f'{ns}preserveLegacyExternalStorage', 'true')
-          
-          # تصحيح الشاشات الحديثة و android:exported
-          for elem in root.findall('.//activity') + root.findall('.//service') + root.findall('.//receiver'):
-              if elem.find('intent-filter') is not None:
-                  if f'{ns}exported' not in elem.attrib:
-                      elem.set(f'{ns}exported', 'true')
-          
-          # إضافة دعم الشاشات الحديثة (Max Aspect Ratio)
           app = root.find('application')
           if app is not None:
-              meta = ET.SubElement(app, 'meta-data')
-              meta.set(f'{ns}name', 'android.max_aspect')
-              meta.set(f'{ns}value', '2.5')
+              # الحيل الأساسية لتجاوز حظر التثبيت في أندرويد 14+ و 15+ و 16
+              app.set(f'{ns}extractNativeLibs', 'true')
+              app.set(f'{ns}multiArch', 'true')
+              app.set(f'{ns}useEmbeddedDex', 'false')
+              app.set(f'{ns}requestLegacyExternalStorage', 'true')
+              app.set(f'{ns}preserveLegacyExternalStorage', 'true')
+              app.set(f'{ns}largeHeap', 'true')
+          
+          # تصحيح exported الإلزامي
+          for elem in root.findall('.//activity') + root.findall('.//service') + root.findall('.//receiver'):
+              if elem.find('intent-filter') is not None:
+                  elem.set(f'{ns}exported', 'true')
                       
           tree.write('decompiled/AndroidManifest.xml', encoding='utf-8', xml_declaration=True)
           "
 
-      - name: Rebuild and Sign
+      - name: Rebuild APK
         run: |
-          java -jar apktool.jar b decompiled -o unsigned.apk
+          # إعادة البناء مع تجاهل أخطاء الـ Resources القديمة
+          java -jar apktool.jar b decompiled -o unsigned.apk --use-aapt2
+
+      - name: Align and Multi-Sign (V1, V2, V3)
+        run: |
           zipalign -v -p 4 unsigned.apk aligned.apk
           keytool -genkey -v -keystore test.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname 'CN=Android,O=Android,C=US'
-          apksigner sign --ks test.keystore --ks-pass pass:android --key-pass pass:android --out patched_final.apk aligned.apk
+          apksigner sign --ks test.keystore --ks-pass pass:android --key-pass pass:android --v1-signing-enabled true --v2-signing-enabled true --v3-signing-enabled true --out patched_final.apk aligned.apk
 
-      - name: Upload
+      - name: Upload Patched APK
         uses: actions/upload-artifact@v4
         with:
           name: Modernized-App
