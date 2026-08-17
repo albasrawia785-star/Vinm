@@ -1,4 +1,4 @@
-name: Patch APK Standalone Fix
+name: Patch APK Permissions & Compatibility
 
 on:
   workflow_dispatch:
@@ -39,17 +39,17 @@ jobs:
         run: |
           TARGET_SDK="${{ github.event.inputs.target_sdk }}"
           
-          # 1. ضبط معايير البناء وإصدارات الـ SDK
+          # 1. ضبط إعدادات الـ SDK
           sed -i "s/targetSdkVersion:.*/targetSdkVersion: '$TARGET_SDK'/g" decompiled/apktool.yml
           sed -i "s/minSdkVersion:.*/minSdkVersion: '21'/g" decompiled/apktool.yml
           
-          # 2. إنشاء هيكل arm64 للتثبيت
+          # 2. إنشاء مسار arm64 لتخطي فحص حزمة التثبيت
           if [ -d "decompiled/lib/armeabi-v7a" ] && [ ! -d "decompiled/lib/arm64-v8a" ]; then
             mkdir -p decompiled/lib/arm64-v8a
             cp -r decompiled/lib/armeabi-v7a/* decompiled/lib/arm64-v8a/ || true
           fi
 
-          # 3. حقن الأذونات والإعدادات البرمجية لتجاوز القيود
+          # 3. حقن الأذونات الشاملة وإعدادات التخزين في الـ Manifest
           python3 -c "
           import xml.etree.ElementTree as ET
           ET.register_namespace('android', 'http://schemas.android.com/apk/res/android')
@@ -57,11 +57,14 @@ jobs:
           root = tree.getroot()
           ns = '{http://schemas.android.com/apk/res/android}'
           
-          # إضافة أذونات الوصول للتخزين الكامل
+          # قائمة الأذونات الشاملة للأندرويد الحديث والقديم
           perms = [
               'android.permission.READ_EXTERNAL_STORAGE',
               'android.permission.WRITE_EXTERNAL_STORAGE',
-              'android.permission.MANAGE_EXTERNAL_STORAGE'
+              'android.permission.MANAGE_EXTERNAL_STORAGE',
+              'android.permission.READ_MEDIA_IMAGES',
+              'android.permission.READ_MEDIA_VIDEO',
+              'android.permission.READ_MEDIA_AUDIO'
           ]
           for p in perms:
               elem = ET.SubElement(root, 'uses-permission')
@@ -76,7 +79,6 @@ jobs:
               app.set(f'{ns}hardwareAccelerated', 'true')
               app.set(f'{ns}multiArch', 'true')
           
-          # تصحيح exported الإلزامي لجميع المكونات
           for elem in root.findall('.//activity') + root.findall('.//service') + root.findall('.//receiver'):
               if elem.find('intent-filter') is not None:
                   elem.set(f'{ns}exported', 'true')
