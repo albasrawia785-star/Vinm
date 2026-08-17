@@ -9,7 +9,7 @@ on:
       target_sdk:
         description: 'Target SDK Version (e.g., 34 or 35)'
         required: true
-        default: '34'
+        default: '35'
 
 jobs:
   patch:
@@ -18,25 +18,36 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Install Dependencies
+      # 1. إعداد بيئة جافا الرسمية المستقرة
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      # 2. تثبيت أدوات أندرويد فقط
+      - name: Install Android Build Tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y zipalign apksigner python3 default-jdk
-          wget -q https://bitbucket.org/iBotPeaches/apktool/downloads/apktool_2.9.3.jar -O apktool.jar
+          sudo apt-get install -y zipalign apksigner python3
+          # تحميل أداة apktool برابط مباشر ومستقر من GitHub Releases
+          curl -L -o apktool.jar "https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar"
 
+      # 3. تحميل وتفكيك التطبيق
       - name: Download and Decompile APK
         run: |
           curl -L -o input.apk "${{ github.event.inputs.apk_url }}"
           java -jar apktool.jar d input.apk -o decompiled -f
 
+      # 4. تطبيق تعديلات التوافق ورفع الـ SDK
       - name: Apply Modern Compatibility Fixes
         run: |
           TARGET_SDK="${{ github.event.inputs.target_sdk }}"
           
-          # 1. تحديث targetSdkVersion
+          # تحديث targetSdkVersion
           sed -i "s/targetSdkVersion:.*/targetSdkVersion: '$TARGET_SDK'/g" decompiled/apktool.yml
           
-          # 2. تعديل Manifest لإضافة android:exported="true" (مطلب أندرويد 12+)
+          # معالجة خاصية exported الإلزامية في أندرويد 12+
           python3 -c "
           import xml.etree.ElementTree as ET
           ET.register_namespace('android', 'http://schemas.android.com/apk/res/android')
@@ -52,17 +63,15 @@ jobs:
           tree.write('decompiled/AndroidManifest.xml', encoding='utf-8', xml_declaration=True)
           "
 
+      # 5. إعادة التجميع والتوقيع الرقمي
       - name: Rebuild and Sign APK
         run: |
           java -jar apktool.jar b decompiled -o unsigned.apk
-          
-          # Align
           zipalign -v -p 4 unsigned.apk aligned.apk
-          
-          # Generate Keystore & Sign
           keytool -genkey -v -keystore test.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname 'CN=Android,O=Android,C=US'
           apksigner sign --ks test.keystore --ks-pass pass:android --key-pass pass:android --out patched_final.apk aligned.apk
 
+      # 6. رفع الناتج النهائي للتحميل
       - name: Upload Patched APK
         uses: actions/upload-artifact@v4
         with:
