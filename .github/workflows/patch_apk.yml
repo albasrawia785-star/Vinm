@@ -1,4 +1,4 @@
-name: Patch APK Bypass 32bit on 64bit
+name: Patch APK Runtime Fix
 
 on:
   workflow_dispatch:
@@ -7,9 +7,9 @@ on:
         description: 'رابط APK المباشر'
         required: true
       target_sdk:
-        description: 'Target SDK (e.g. 35)'
+        description: 'Target SDK'
         required: true
-        default: '35'
+        default: '34'
 
 jobs:
   patch:
@@ -35,23 +35,20 @@ jobs:
           curl -L -o input.apk "${{ github.event.inputs.apk_url }}"
           java -jar apktool.jar d input.apk -o decompiled -f
 
-      - name: Hack Architecture & Bypass 64-bit Check
+      - name: Patch Native Libs & Permissions
         run: |
           TARGET_SDK="${{ github.event.inputs.target_sdk }}"
           
-          # 1. ضبط إعدادات الـ SDK لنسخ أندرويد الحديثة
           sed -i "s/targetSdkVersion:.*/targetSdkVersion: '$TARGET_SDK'/g" decompiled/apktool.yml
           sed -i "s/minSdkVersion:.*/minSdkVersion: '21'/g" decompiled/apktool.yml
           
-          # 2. حيلة المعمارية: إنشاء مجلد arm64 وهمي إذا كان التطبيق 32-bit فقط
-          if [ -d "decompiled/lib/armeabi-v7a" ] && [ ! -d "decompiled/lib/arm64-v8a" ]; then
-            echo "Bypassing 32-bit restriction by creating arm64 mapping..."
+          # نسخ المكتبات لجميع المعماريات لضمان التوافق مع مشغلات النظام
+          if [ -d "decompiled/lib/armeabi-v7a" ]; then
             mkdir -p decompiled/lib/arm64-v8a
-            # نسخ المكتبات مع الحفاظ على التوافق لخداع الـ PackageInstaller
             cp -r decompiled/lib/armeabi-v7a/* decompiled/lib/arm64-v8a/ || true
           fi
 
-          # 3. تعديل شامل وصارم لملف AndroidManifest.xml
+          # تعديل Manifest وحقن الصلاحيات
           python3 -c "
           import xml.etree.ElementTree as ET
           ET.register_namespace('android', 'http://schemas.android.com/apk/res/android')
@@ -59,17 +56,23 @@ jobs:
           root = tree.getroot()
           ns = '{http://schemas.android.com/apk/res/android}'
           
+          # إضافة أذونات الوصول للتخزين الكامل لأندرويد 11 فما فوق
+          permissions = [
+              'android.permission.READ_EXTERNAL_STORAGE',
+              'android.permission.WRITE_EXTERNAL_STORAGE',
+              'android.permission.MANAGE_EXTERNAL_STORAGE'
+          ]
+          for perm in permissions:
+              elem = ET.SubElement(root, 'uses-permission')
+              elem.set(f'{ns}name', perm)
+          
           app = root.find('application')
           if app is not None:
-              # الحيل الأساسية لتجاوز حظر التثبيت في أندرويد 14+ و 15+ و 16
               app.set(f'{ns}extractNativeLibs', 'true')
-              app.set(f'{ns}multiArch', 'true')
-              app.set(f'{ns}useEmbeddedDex', 'false')
               app.set(f'{ns}requestLegacyExternalStorage', 'true')
               app.set(f'{ns}preserveLegacyExternalStorage', 'true')
-              app.set(f'{ns}largeHeap', 'true')
+              app.set(f'{ns}hardwareAccelerated', 'true')
           
-          # تصحيح exported الإلزامي
           for elem in root.findall('.//activity') + root.findall('.//service') + root.findall('.//receiver'):
               if elem.find('intent-filter') is not None:
                   elem.set(f'{ns}exported', 'true')
@@ -79,10 +82,9 @@ jobs:
 
       - name: Rebuild APK
         run: |
-          # إعادة البناء مع تجاهل أخطاء الـ Resources القديمة
-          java -jar apktool.jar b decompiled -o unsigned.apk --use-aapt2
+          java -jar apktool.jar b decompiled -o unsigned.apk
 
-      - name: Align and Multi-Sign (V1, V2, V3)
+      - name: Align and Multi-Sign
         run: |
           zipalign -v -p 4 unsigned.apk aligned.apk
           keytool -genkey -v -keystore test.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname 'CN=Android,O=Android,C=US'
