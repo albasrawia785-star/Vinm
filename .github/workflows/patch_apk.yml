@@ -1,13 +1,13 @@
-name: Patch APK Runtime Arm32 Hook
+name: Patch APK Standalone Fix
 
 on:
   workflow_dispatch:
     inputs:
       apk_url:
-        description: 'رابط مباشر لتحميل الـ APK'
+        description: 'رابط APK المباشر'
         required: true
       target_sdk:
-        description: 'Target SDK'
+        description: 'Target SDK Version'
         required: true
         default: '34'
 
@@ -15,7 +15,7 @@ jobs:
   patch:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Repository
+      - name: Checkout Repo
         uses: actions/checkout@v4
 
       - name: Set up Java 17
@@ -24,30 +24,32 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Install Tools
+      - name: Install Build Tools
         run: |
           sudo apt-get update
           sudo apt-get install -y zipalign apksigner python3
           curl -L -o apktool.jar "https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar"
 
-      - name: Download & Decompile
+      - name: Download and Decompile APK
         run: |
           curl -L -o input.apk "${{ github.event.inputs.apk_url }}"
           java -jar apktool.jar d input.apk -o decompiled -f
 
-      - name: Inject Compatibility & Native Fixes
+      - name: Patch Native Libs & Permissions
         run: |
           TARGET_SDK="${{ github.event.inputs.target_sdk }}"
           
-          # 1. ضبط معايير البناء لضمان قراءة ملفات النظام
+          # 1. ضبط معايير البناء وإصدارات الـ SDK
           sed -i "s/targetSdkVersion:.*/targetSdkVersion: '$TARGET_SDK'/g" decompiled/apktool.yml
           sed -i "s/minSdkVersion:.*/minSdkVersion: '21'/g" decompiled/apktool.yml
           
-          # 2. تنظيف تضارب الـ ABI: نعتمد حصراً على مجلد armeabi-v7a الأصلي دون نسخه لـ arm64
-          # (لأن وجود ملف 32bit داخل مجلد arm64 هو ما يتسبب في الانهيار المباشر ELFCLASS32)
-          rm -rf decompiled/lib/arm64-v8a
+          # 2. إنشاء هيكل arm64 للتثبيت
+          if [ -d "decompiled/lib/armeabi-v7a" ] && [ ! -d "decompiled/lib/arm64-v8a" ]; then
+            mkdir -p decompiled/lib/arm64-v8a
+            cp -r decompiled/lib/armeabi-v7a/* decompiled/lib/arm64-v8a/ || true
+          fi
 
-          # 3. حقن التجاوز البرمجي لملف AndroidManifest.xml
+          # 3. حقن الأذونات والإعدادات البرمجية لتجاوز القيود
           python3 -c "
           import xml.etree.ElementTree as ET
           ET.register_namespace('android', 'http://schemas.android.com/apk/res/android')
@@ -55,12 +57,11 @@ jobs:
           root = tree.getroot()
           ns = '{http://schemas.android.com/apk/res/android}'
           
-          # إضافة كافة أذونات قراءة الذاكرة وتخطي قيود التخزين النطاقي
+          # إضافة أذونات الوصول للتخزين الكامل
           perms = [
               'android.permission.READ_EXTERNAL_STORAGE',
               'android.permission.WRITE_EXTERNAL_STORAGE',
-              'android.permission.MANAGE_EXTERNAL_STORAGE',
-              'android.permission.ACCESS_MEDIA_LOCATION'
+              'android.permission.MANAGE_EXTERNAL_STORAGE'
           ]
           for p in perms:
               elem = ET.SubElement(root, 'uses-permission')
@@ -68,14 +69,14 @@ jobs:
           
           app = root.find('application')
           if app is not None:
-              # إجبار النظام على استخراج المكتبات الأصلية إلى مسار النظام بدلاً من الذاكرة العشوائية
               app.set(f'{ns}extractNativeLibs', 'true')
               app.set(f'{ns}requestLegacyExternalStorage', 'true')
               app.set(f'{ns}preserveLegacyExternalStorage', 'true')
               app.set(f'{ns}largeHeap', 'true')
               app.set(f'{ns}hardwareAccelerated', 'true')
+              app.set(f'{ns}multiArch', 'true')
           
-          # تصحيح الـ Exported الإلزامي
+          # تصحيح exported الإلزامي لجميع المكونات
           for elem in root.findall('.//activity') + root.findall('.//service') + root.findall('.//receiver'):
               if elem.find('intent-filter') is not None:
                   elem.set(f'{ns}exported', 'true')
@@ -87,13 +88,13 @@ jobs:
         run: |
           java -jar apktool.jar b decompiled -o unsigned.apk
 
-      - name: Align and Sign
+      - name: Align and Multi-Sign (V1, V2, V3)
         run: |
           zipalign -v -p 4 unsigned.apk aligned.apk
           keytool -genkey -v -keystore test.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname 'CN=Android,O=Android,C=US'
           apksigner sign --ks test.keystore --ks-pass pass:android --key-pass pass:android --v1-signing-enabled true --v2-signing-enabled true --v3-signing-enabled true --out patched_final.apk aligned.apk
 
-      - name: Upload Output
+      - name: Upload Patched APK
         uses: actions/upload-artifact@v4
         with:
           name: Modernized-App
