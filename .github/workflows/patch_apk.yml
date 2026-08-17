@@ -1,4 +1,4 @@
-name: Patch Old APK to Android 15
+name: Patch APK
 
 on:
   workflow_dispatch:
@@ -6,56 +6,65 @@ on:
       apk_url:
         description: 'رابط مباشر لتحميل ملف الـ APK'
         required: true
-
-permissions:
-  contents: write
+      target_sdk:
+        description: 'Target SDK Version (e.g., 34 or 35)'
+        required: true
+        default: '34'
 
 jobs:
-  patch-and-update:
+  patch:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Setup Environment
+      - name: Install Dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y zipalign apksigner python3 default-jdk
           wget -q https://bitbucket.org/iBotPeaches/apktool/downloads/apktool_2.9.3.jar -O apktool.jar
 
-      - name: Download and Decompile
+      - name: Download and Decompile APK
         run: |
           curl -L -o input.apk "${{ github.event.inputs.apk_url }}"
           java -jar apktool.jar d input.apk -o decompiled -f
 
-      - name: Patch Manifest and SDK
+      - name: Apply Modern Compatibility Fixes
         run: |
-          # 1. تحديث targetSdkVersion في ملف apktool.yml
-          sed -i "s/targetSdkVersion:.*/targetSdkVersion: '35'/g" decompiled/apktool.yml
+          TARGET_SDK="${{ github.event.inputs.target_sdk }}"
           
-          # 2. إضافة android:exported="true" للمكونات (مطلب أندرويد 12+)
+          # 1. تحديث targetSdkVersion
+          sed -i "s/targetSdkVersion:.*/targetSdkVersion: '$TARGET_SDK'/g" decompiled/apktool.yml
+          
+          # 2. تعديل Manifest لإضافة android:exported="true" (مطلب أندرويد 12+)
           python3 -c "
           import xml.etree.ElementTree as ET
           ET.register_namespace('android', 'http://schemas.android.com/apk/res/android')
           tree = ET.parse('decompiled/AndroidManifest.xml')
           root = tree.getroot()
           ns = '{http://schemas.android.com/apk/res/android}'
+          
           for elem in root.findall('.//activity') + root.findall('.//service') + root.findall('.//receiver'):
               if elem.find('intent-filter') is not None:
                   if f'{ns}exported' not in elem.attrib:
                       elem.set(f'{ns}exported', 'true')
+                      
           tree.write('decompiled/AndroidManifest.xml', encoding='utf-8', xml_declaration=True)
           "
 
-      - name: Rebuild and Sign
+      - name: Rebuild and Sign APK
         run: |
           java -jar apktool.jar b decompiled -o unsigned.apk
+          
+          # Align
           zipalign -v -p 4 unsigned.apk aligned.apk
+          
+          # Generate Keystore & Sign
           keytool -genkey -v -keystore test.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname 'CN=Android,O=Android,C=US'
-          apksigner sign --ks test.keystore --ks-pass pass:android --key-pass pass:android --out final_patched.apk aligned.apk
+          apksigner sign --ks test.keystore --ks-pass pass:android --key-pass pass:android --out patched_final.apk aligned.apk
 
-      - name: Upload Artifact
+      - name: Upload Patched APK
         uses: actions/upload-artifact@v4
         with:
-          name: Modernized-App-Android-15
-          path: final_patched.apk
+          name: Modernized-App
+          path: patched_final.apk
