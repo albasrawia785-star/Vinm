@@ -1,4 +1,4 @@
-name: Patch APK Ultimate Fix
+name: Universal Compatibility Patcher
 
 on:
   workflow_dispatch:
@@ -36,21 +36,23 @@ jobs:
           curl -L -o input.apk "${{ github.event.inputs.apk_url }}"
           java -jar apktool.jar d input.apk -o decompiled -f
 
-      - name: Patch Native Libs & Permissions
+      - name: Universal Architecture & Manifest Patch
         run: |
           TARGET_SDK="${{ github.event.inputs.target_sdk }}"
           
-          # ضبط الـ SDK
+          # 1. ضبط معايير البناء
           sed -i "s/targetSdkVersion:.*/targetSdkVersion: '$TARGET_SDK'/g" decompiled/apktool.yml
           sed -i "s/minSdkVersion:.*/minSdkVersion: '21'/g" decompiled/apktool.yml
           
-          # معالجة مجلد المعمارية للتثبيت
-          if [ -d "decompiled/lib/armeabi-v7a" ] && [ ! -d "decompiled/lib/arm64-v8a" ]; then
-            mkdir -p decompiled/lib/arm64-v8a
+          # 2. إنشاء هيكل arm64 من أي مجلد 32-bit موجود (armeabi / armeabi-v7a)
+          mkdir -p decompiled/lib/arm64-v8a
+          if [ -d "decompiled/lib/armeabi-v7a" ]; then
             cp -r decompiled/lib/armeabi-v7a/* decompiled/lib/arm64-v8a/ || true
+          elif [ -d "decompiled/lib/armeabi" ]; then
+            cp -r decompiled/lib/armeabi/* decompiled/lib/arm64-v8a/ || true
           fi
 
-          # تعديل Manifest وحقن الصلاحيات
+          # 3. تعديل Manifest البرمجي الشامل
           python3 -c "
           import xml.etree.ElementTree as ET
           ET.register_namespace('android', 'http://schemas.android.com/apk/res/android')
@@ -58,14 +60,10 @@ jobs:
           root = tree.getroot()
           ns = '{http://schemas.android.com/apk/res/android}'
           
-          perms = [
-              'android.permission.READ_EXTERNAL_STORAGE',
-              'android.permission.WRITE_EXTERNAL_STORAGE',
-              'android.permission.MANAGE_EXTERNAL_STORAGE'
-          ]
-          for p in perms:
+          # حقن أذونات التخزين الشاملة
+          for perm in ['android.permission.READ_EXTERNAL_STORAGE', 'android.permission.WRITE_EXTERNAL_STORAGE', 'android.permission.MANAGE_EXTERNAL_STORAGE']:
               elem = ET.SubElement(root, 'uses-permission')
-              elem.set(f'{ns}name', p)
+              elem.set(f'{ns}name', perm)
           
           app = root.find('application')
           if app is not None:
@@ -75,6 +73,7 @@ jobs:
               app.set(f'{ns}hardwareAccelerated', 'true')
               app.set(f'{ns}multiArch', 'true')
           
+          # تصحيح exported الإلزامي لجميع المكونات
           for elem in root.findall('.//activity') + root.findall('.//service') + root.findall('.//receiver'):
               if elem.find('intent-filter') is not None:
                   elem.set(f'{ns}exported', 'true')
@@ -82,16 +81,11 @@ jobs:
           tree.write('decompiled/AndroidManifest.xml', encoding='utf-8', xml_declaration=True)
           "
 
-      - name: Fast Rebuild & Sign APK
+      - name: Build & Multi-Sign
         run: |
-          # بناء سريع بالوضع الافتراضي
           java -jar apktool.jar b decompiled -o unsigned.apk
-          
-          # محاذاة 4-byte
           zipalign -v -p 4 unsigned.apk aligned.apk
-          
-          # توليد المفتاح والتوقيع بشكل مباشر
-          keytool -genkey -v -keystore test.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android,O=Android,C=US"
+          keytool -genkey -v -keystore test.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname 'CN=Android,O=Android,C=US'
           apksigner sign --ks test.keystore --ks-pass pass:android --key-pass pass:android --v1-signing-enabled true --v2-signing-enabled true --v3-signing-enabled true --out patched_final.apk aligned.apk
 
       - name: Upload Patched APK
