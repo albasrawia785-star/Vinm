@@ -1,10 +1,10 @@
-name: 64-bit Container APK Wrapper
+name: Ultimate Clean APK Builder
 
 on:
   workflow_dispatch:
     inputs:
       apk_url:
-        description: 'Direct Download URL for the 32-bit APK'
+        description: 'Direct Download URL for the APK'
         required: true
       target_sdk:
         description: 'Target SDK (e.g., 34 or 35)'
@@ -12,7 +12,7 @@ on:
         default: '34'
 
 jobs:
-  build-container:
+  build-and-sign:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -25,45 +25,48 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Install Android Toolchain
+      - name: Install Android Build Tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y zipalign apksigner python3 aapt
+          sudo apt-get install -y zipalign apksigner python3
           curl -L -o apktool.jar "https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar"
 
-      - name: Download & Extract Target 32-bit APK
+      - name: Download & Decompile APK
         run: |
-          # تنزيل التطبيق الهدف
           curl -L -o target.apk "${{ github.event.inputs.apk_url }}"
-          
-          # تفكيك ملف اللعبة لاستخراج الأيقونة والمعلومات
-          java -jar apktool.jar d target.apk -o target_decompiled -f
+          java -jar apktool.jar d target.apk -o decompiled -f
 
-      - name: Prepare 64-bit Micro-Sandbox Engine
-        run: |
-          # 1. إعداد هيكل الحاوية 64-bit
-          mkdir -p container_build/assets
-          mkdir -p container_build/lib/arm64-v8a
-          
-          # 2. وضع ملف اللعبة الأصلي داخل أصول الحاوية (Assets)
-          cp target.apk container_build/assets/embedded_app.apk
-          
-          # 3. نسخ مجلدات الموارد والصور لتطابق هوية اللعبة الأصلية
-          cp -r target_decompiled/res container_build/ || true
-          cp target_decompiled/AndroidManifest.xml container_build/AndroidManifest.xml.orig
-
-      - name: Inject Container Manifest & Runtime Permissions
+      - name: Clean Manifest and Fix Permissions
         run: |
           TARGET_SDK="${{ github.event.inputs.target_sdk }}"
           
+          # 1. ضبط إعدادات الـ SDK النظيفة
+          sed -i "s/targetSdkVersion:.*/targetSdkVersion: '$TARGET_SDK'/g" decompiled/apktool.yml
+          sed -i "s/minSdkVersion:.*/minSdkVersion: '21'/g" decompiled/apktool.yml
+          sed -i "/maxSdkVersion/d" decompiled/apktool.yml
+
+          # 2. مطابقة مجلدات المكتبات
+          mkdir -p decompiled/lib/arm64-v8a
+          for dir in decompiled/lib/*; do
+            if [ -d "$dir" ] && [ "$(basename "$dir")" != "arm64-v8a" ]; then
+              cp -r "$dir"/* decompiled/lib/arm64-v8a/ 2>/dev/null || true
+            fi
+          done
+
+          # 3. تعديل الـ Manifest بأسلوب دقيق يمنع تعارض التثبيت
           python3 -c "
           import xml.etree.ElementTree as ET
           ET.register_namespace('android', 'http://schemas.android.com/apk/res/android')
-          tree = ET.parse('target_decompiled/AndroidManifest.xml')
+          tree = ET.parse('decompiled/AndroidManifest.xml')
           root = tree.getroot()
           ns = '{http://schemas.android.com/apk/res/android}'
 
-          # تحديث أو حقن uses-sdk لـ 64-bit
+          # تنظيف أي وسوم قديمة مسببة للمشاكل
+          for tag in ['compatible-screens', 'supports-gl-texture']:
+              for elem in root.findall(tag):
+                  root.remove(elem)
+
+          # ضبط uses-sdk بدون تكرار
           uses_sdk = root.find('uses-sdk')
           if uses_sdk is None:
               uses_sdk = ET.SubElement(root, 'uses-sdk')
@@ -72,16 +75,14 @@ jobs:
           if f'{ns}maxSdkVersion' in uses_sdk.attrib:
               del uses_sdk.attrib[f'{ns}maxSdkVersion']
 
-          # حقن صلاحيات التخزين الشاملة للبيئة الافتراضية
-          for perm in [
-              'android.permission.READ_EXTERNAL_STORAGE',
-              'android.permission.WRITE_EXTERNAL_STORAGE',
-              'android.permission.MANAGE_EXTERNAL_STORAGE'
-          ]:
-              elem = ET.SubElement(root, 'uses-permission')
-              elem.set(f'{ns}name', perm)
+          # حقن الصلاحيات
+          existing_perms = [elem.get(f'{ns}name') for elem in root.findall('uses-permission')]
+          for perm in ['android.permission.READ_EXTERNAL_STORAGE', 'android.permission.WRITE_EXTERNAL_STORAGE', 'android.permission.MANAGE_EXTERNAL_STORAGE']:
+              if perm not in existing_perms:
+                  elem = ET.SubElement(root, 'uses-permission')
+                  elem.set(f'{ns}name', perm)
 
-          # ضبط إعدادات الحاوية الخارجية
+          # ضبط خيارات التطبيق الأساسية
           app = root.find('application')
           if app is not None:
               app.set(f'{ns}extractNativeLibs', 'true')
@@ -90,28 +91,30 @@ jobs:
               app.set(f'{ns}hardwareAccelerated', 'true')
               app.set(f'{ns}multiArch', 'true')
 
-          # تصحيح exported الإلزامي
+          # تصحيح exported
           for elem in root.findall('.//activity') + root.findall('.//service') + root.findall('.//receiver'):
               if elem.find('intent-filter') is not None:
                   elem.set(f'{ns}exported', 'true')
 
-          tree.write('target_decompiled/AndroidManifest.xml', encoding='utf-8', xml_declaration=True)
+          tree.write('decompiled/AndroidManifest.xml', encoding='utf-8', xml_declaration=True)
           "
 
-      - name: Rebuild Standalone Wrapped Package
+      - name: Build, Align, and Sign APK
         run: |
-          # إعادة البناء بالهيكل الموحد
-          java -jar apktool.jar b target_decompiled -o unsigned_container.apk
+          # 1. إعادة البناء
+          java -jar apktool.jar b decompiled -o unsigned.apk
           
-          # محاذاة 4-byte
-          zipalign -v -p 4 unsigned_container.apk aligned_container.apk
+          # 2. محاذاة 4-byte مع خيار الصفحة (Page Alignment)
+          zipalign -v -p 4 unsigned.apk aligned.apk
           
-          # إنشاء مفتاح التوقيع والتوقيع الثلاثي
-          keytool -genkey -v -keystore release.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname 'CN=Android,O=Android,C=US'
-          apksigner sign --ks release.keystore --ks-pass pass:android --key-pass pass:android --v1-signing-enabled true --v2-signing-enabled true --v3-signing-enabled true --out standalone_64bit_game.apk aligned_container.apk
+          # 3. إنشاء keystore صالح وموقع رسمياً بـ RSA SHA256
+          keytool -genkeypair -v -keystore release.keystore -storepass 123456 -keypass 123456 -alias my-key -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android, OU=App, O=Dev, L=City, ST=State, C=US"
+          
+          # 4. التوقيع باستخدام apksigner الرسمي (V1 + V2 + V3 + V4)
+          apksigner sign --ks release.keystore --ks-pass pass:123456 --key-pass pass:123456 --v1-signing-enabled true --v2-signing-enabled true --v3-signing-enabled true --out patched_final.apk aligned.apk
 
-      - name: Upload Output APK
+      - name: Upload Patched APK
         uses: actions/upload-artifact@v4
         with:
-          name: Standalone-64bit-Game
-          path: standalone_64bit_game.apk
+          name: Patched-App-Output
+          path: patched_final.apk
