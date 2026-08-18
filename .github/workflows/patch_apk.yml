@@ -35,12 +35,13 @@ jobs:
           TARGET_SDK="${{ github.event.inputs.target_sdk }}"
           if [ -z "$TARGET_SDK" ]; then TARGET_SDK="34"; fi
           
-          # 1. تدمير وسوم القيود في الملفات النصية
+          # 1. تنظيف عميق لملف apktool.yml
           sed -i '/maxSdkVersion/d' decompiled/apktool.yml
+          sed -i '/isSplitRequired/d' decompiled/apktool.yml
           sed -i 's/minSdkVersion:.*/minSdkVersion: 21/g' decompiled/apktool.yml
           sed -i "s/targetSdkVersion:.*/targetSdkVersion: '$TARGET_SDK'/g" decompiled/apktool.yml
           
-          # 2. مطابقة المعمارية لـ arm64-v8a
+          # 2. إنشاء وتوحيد مسار arm64-v8a
           mkdir -p decompiled/lib/arm64-v8a
           for dir in decompiled/lib/*; do
             if [ -d "$dir" ] && [ "$(basename "$dir")" != "arm64-v8a" ]; then
@@ -48,10 +49,10 @@ jobs:
             fi
           done
           
-          # 3. تطهير الملفات الثنائية عبر patchelf
+          # 3. إزالة القيود من المكتبات الثنائية
           find decompiled/lib/ -type f -name "*.so" -exec patchelf --clear-execstack {} + 2>/dev/null || true
 
-          # 4. التدمير الشامل لكل قيود المانيفست
+          # 4. التعديل الجذري للمانيفست
           python3 -c "
           import xml.etree.ElementTree as ET
           ET.register_namespace('android', 'http://schemas.android.com/apk/res/android')
@@ -59,18 +60,30 @@ jobs:
           root = tree.getroot()
           ns = '{http://schemas.android.com/apk/res/android}'
           
-          # إزالة قيود التوافق والشاشات والعتاد
-          forbidden_tags = ['compatible-screens', 'supports-gl-texture', 'uses-feature', 'uses-configuration', 'supports-screens']
+          # حذف جميع الوسوم التي تسبب رفض النظام للحزمة
+          forbidden_tags = [
+              'compatible-screens',
+              'supports-gl-texture',
+              'uses-feature',
+              'uses-configuration',
+              'supports-screens',
+              'uses-native-library'
+          ]
           for tag in forbidden_tags:
               for elem in root.findall(tag):
                   root.remove(elem)
           
-          # حذف maxSdkVersion إن وجد
+          # حذف maxSdkVersion من uses-sdk
           uses_sdk = root.find('uses-sdk')
           if uses_sdk is not None and f'{ns}maxSdkVersion' in uses_sdk.attrib:
               del uses_sdk.attrib[f'{ns}maxSdkVersion']
           
-          # حقن بيئة العمل الشاملة
+          # تطبيق دعم الشاشات بدون استثناء
+          supports = ET.SubElement(root, 'supports-screens')
+          for attr in ['anyDensity', 'smallScreens', 'normalScreens', 'largeScreens', 'xlargeScreens', 'resizeable']:
+              supports.set(f'{ns}{attr}', 'true')
+
+          # ضبط خيارات المحرك والذاكرة
           app = root.find('application')
           if app is not None:
               app.set(f'{ns}extractNativeLibs', 'true')
@@ -80,7 +93,7 @@ jobs:
               app.set(f'{ns}requestLegacyExternalStorage', 'true')
               app.set(f'{ns}preserveLegacyExternalStorage', 'true')
           
-          # حقن الصلاحيات الشاملة
+          # حقن الصلاحيات الشاملة للتخزين والوسائط
           perms = [
               'android.permission.READ_EXTERNAL_STORAGE',
               'android.permission.WRITE_EXTERNAL_STORAGE',
@@ -103,7 +116,7 @@ jobs:
           tree.write('decompiled/AndroidManifest.xml', encoding='utf-8', xml_declaration=True)
           "
 
-      - name: Fast Rebuild and Sign
+      - name: Fast Rebuild, Align & Multi-Sign
         run: |
           java -jar apktool.jar b decompiled -o unsigned.apk
           zipalign -v -p 4 unsigned.apk aligned.apk
