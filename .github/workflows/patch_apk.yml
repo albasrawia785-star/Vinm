@@ -1,10 +1,10 @@
-name: Ultimate Clean APK Builder
+name: Ultimate Engine & Architecture Patcher
 
 on:
   workflow_dispatch:
     inputs:
       apk_url:
-        description: 'Direct Download URL for the APK'
+        description: 'Direct Download URL for APK'
         required: true
       target_sdk:
         description: 'Target SDK (e.g., 34 or 35)'
@@ -12,48 +12,52 @@ on:
         default: '34'
 
 jobs:
-  build-and-sign:
+  build-and-patch:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Set up JDK 17
+      - name: Set up JDK 17 & Python
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Install Android Build Tools
+      - name: Install Advanced Binary & Build Tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y zipalign apksigner python3
+          sudo apt-get install -y zipalign apksigner python3 python3-pip patchelf
+          pip3 install --no-cache-dir lief
           curl -L -o apktool.jar "https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar"
 
       - name: Download & Decompile APK
         run: |
-          curl -L -o target.apk "${{ github.event.inputs.apk_url }}"
-          java -jar apktool.jar d target.apk -o decompiled -f
+          curl -L -o input.apk "${{ github.event.inputs.apk_url }}"
+          java -jar apktool.jar d input.apk -o decompiled -f
 
-      - name: Clean Manifest and Fix Permissions
+      - name: Deep Binary & Architecture Patching
         run: |
           TARGET_SDK="${{ github.event.inputs.target_sdk }}"
           
-          # 1. ضبط إعدادات الـ SDK النظيفة
+          # 1. ضبط إعدادات الـ SDK
           sed -i "s/targetSdkVersion:.*/targetSdkVersion: '$TARGET_SDK'/g" decompiled/apktool.yml
           sed -i "s/minSdkVersion:.*/minSdkVersion: '21'/g" decompiled/apktool.yml
           sed -i "/maxSdkVersion/d" decompiled/apktool.yml
 
-          # 2. مطابقة مجلدات المكتبات
+          # 2. مطابقة وتوليد مجلدات المعمارية arm64-v8a
           mkdir -p decompiled/lib/arm64-v8a
-          for dir in decompiled/lib/*; do
-            if [ -d "$dir" ] && [ "$(basename "$dir")" != "arm64-v8a" ]; then
-              cp -r "$dir"/* decompiled/lib/arm64-v8a/ 2>/dev/null || true
+          for abi in armeabi-v7a armeabi x86; do
+            if [ -d "decompiled/lib/$abi" ]; then
+              cp -r decompiled/lib/$abi/* decompiled/lib/arm64-v8a/ 2>/dev/null || true
             fi
           done
 
-          # 3. تعديل الـ Manifest بأسلوب دقيق يمنع تعارض التثبيت
+          # 3. استخدام patchelf لتنظيف مسارات البحث في ملفات .so وتفادي أخطاء النواة
+          find decompiled/lib/ -type f -name "*.so" -exec patchelf --clear-execstack {} + 2>/dev/null || true
+
+          # 4. التعديل الجذري والشامل لملف AndroidManifest.xml
           python3 -c "
           import xml.etree.ElementTree as ET
           ET.register_namespace('android', 'http://schemas.android.com/apk/res/android')
@@ -61,12 +65,12 @@ jobs:
           root = tree.getroot()
           ns = '{http://schemas.android.com/apk/res/android}'
 
-          # تنظيف أي وسوم قديمة مسببة للمشاكل
+          # إزالة وسوم التوافق القديمة المسببة للرفض
           for tag in ['compatible-screens', 'supports-gl-texture']:
               for elem in root.findall(tag):
                   root.remove(elem)
 
-          # ضبط uses-sdk بدون تكرار
+          # ضبط uses-sdk وحذف القيود
           uses_sdk = root.find('uses-sdk')
           if uses_sdk is None:
               uses_sdk = ET.SubElement(root, 'uses-sdk')
@@ -75,23 +79,40 @@ jobs:
           if f'{ns}maxSdkVersion' in uses_sdk.attrib:
               del uses_sdk.attrib[f'{ns}maxSdkVersion']
 
-          # حقن الصلاحيات
-          existing_perms = [elem.get(f'{ns}name') for elem in root.findall('uses-permission')]
-          for perm in ['android.permission.READ_EXTERNAL_STORAGE', 'android.permission.WRITE_EXTERNAL_STORAGE', 'android.permission.MANAGE_EXTERNAL_STORAGE']:
-              if perm not in existing_perms:
-                  elem = ET.SubElement(root, 'uses-permission')
-                  elem.set(f'{ns}name', perm)
+          # فرض دعم جميع الشاشات والكثافات
+          supports = root.find('supports-screens')
+          if supports is None:
+              supports = ET.SubElement(root, 'supports-screens')
+          for attr in ['anyDensity', 'smallScreens', 'normalScreens', 'largeScreens', 'xlargeScreens', 'resizeable']:
+              supports.set(f'{ns}{attr}', 'true')
 
-          # ضبط خيارات التطبيق الأساسية
+          # حقن صلاحيات التخزين الشاملة
+          perms = [
+              'android.permission.READ_EXTERNAL_STORAGE',
+              'android.permission.WRITE_EXTERNAL_STORAGE',
+              'android.permission.MANAGE_EXTERNAL_STORAGE',
+              'android.permission.READ_MEDIA_IMAGES',
+              'android.permission.READ_MEDIA_VIDEO',
+              'android.permission.READ_MEDIA_AUDIO'
+          ]
+          existing_perms = [p.get(f'{ns}name') for p in root.findall('uses-permission')]
+          for p in perms:
+              if p not in existing_perms:
+                  elem = ET.SubElement(root, 'uses-permission')
+                  elem.set(f'{ns}name', p)
+
+          # ضبط خصائص التطبيق لبيئة التشغيل الحديثة
           app = root.find('application')
           if app is not None:
               app.set(f'{ns}extractNativeLibs', 'true')
               app.set(f'{ns}requestLegacyExternalStorage', 'true')
+              app.set(f'{ns}preserveLegacyExternalStorage', 'true')
               app.set(f'{ns}largeHeap', 'true')
               app.set(f'{ns}hardwareAccelerated', 'true')
               app.set(f'{ns}multiArch', 'true')
+              app.set(f'{ns}allowBackup', 'true')
 
-          # تصحيح exported
+          # تصحيح exported الإلزامي لجميع المكونات
           for elem in root.findall('.//activity') + root.findall('.//service') + root.findall('.//receiver'):
               if elem.find('intent-filter') is not None:
                   elem.set(f'{ns}exported', 'true')
@@ -99,22 +120,22 @@ jobs:
           tree.write('decompiled/AndroidManifest.xml', encoding='utf-8', xml_declaration=True)
           "
 
-      - name: Build, Align, and Sign APK
+      - name: Rebuild, Align, and Sign Package
         run: |
-          # 1. إعادة البناء
+          # إعادة البناء السريع
           java -jar apktool.jar b decompiled -o unsigned.apk
           
-          # 2. محاذاة 4-byte مع خيار الصفحة (Page Alignment)
+          # محاذاة 4-byte
           zipalign -v -p 4 unsigned.apk aligned.apk
           
-          # 3. إنشاء keystore صالح وموقع رسمياً بـ RSA SHA256
-          keytool -genkeypair -v -keystore release.keystore -storepass 123456 -keypass 123456 -alias my-key -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android, OU=App, O=Dev, L=City, ST=State, C=US"
+          # توليد مفتاح توقيع RSA 2048
+          keytool -genkeypair -v -keystore release.keystore -storepass 123456 -keypass 123456 -alias releasekey -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android, OU=App, O=Org, L=City, ST=State, C=US"
           
-          # 4. التوقيع باستخدام apksigner الرسمي (V1 + V2 + V3 + V4)
+          # التوقيع الشامل (V1 + V2 + V3)
           apksigner sign --ks release.keystore --ks-pass pass:123456 --key-pass pass:123456 --v1-signing-enabled true --v2-signing-enabled true --v3-signing-enabled true --out patched_final.apk aligned.apk
 
       - name: Upload Patched APK
         uses: actions/upload-artifact@v4
         with:
-          name: Patched-App-Output
+          name: Patched-Universal-App
           path: patched_final.apk
