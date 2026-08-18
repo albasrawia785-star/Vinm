@@ -6,13 +6,17 @@ on:
       apk_url:
         description: 'Direct Download URL for APK'
         required: true
+      target_sdk:
+        description: 'Target SDK Version'
+        required: false
+        default: '34'
 
 jobs:
   patch-everything:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 15
     steps:
-      - name: Checkout
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
       - name: Prepare Environment
@@ -28,19 +32,26 @@ jobs:
 
       - name: Nuclear De-restriction Script
         run: |
+          TARGET_SDK="${{ github.event.inputs.target_sdk }}"
+          if [ -z "$TARGET_SDK" ]; then TARGET_SDK="34"; fi
+          
           # 1. تدمير وسوم القيود في الملفات النصية
           sed -i '/maxSdkVersion/d' decompiled/apktool.yml
           sed -i 's/minSdkVersion:.*/minSdkVersion: 21/g' decompiled/apktool.yml
-          sed -i 's/targetSdkVersion:.*/targetSdkVersion: 34/g' decompiled/apktool.yml
+          sed -i "s/targetSdkVersion:.*/targetSdkVersion: '$TARGET_SDK'/g" decompiled/apktool.yml
           
           # 2. مطابقة المعمارية لـ arm64-v8a
           mkdir -p decompiled/lib/arm64-v8a
-          cp -r decompiled/lib/armeabi-v7a/* decompiled/lib/arm64-v8a/ 2>/dev/null || true
+          for dir in decompiled/lib/*; do
+            if [ -d "$dir" ] && [ "$(basename "$dir")" != "arm64-v8a" ]; then
+              cp -r "$dir"/* decompiled/lib/arm64-v8a/ 2>/dev/null || true
+            fi
+          done
           
-          # 3. تطهير الملفات الثنائية (الخطوة الأهم للـ Crash)
+          # 3. تطهير الملفات الثنائية عبر patchelf
           find decompiled/lib/ -type f -name "*.so" -exec patchelf --clear-execstack {} + 2>/dev/null || true
 
-          # 4. التدمير الشامل لكل القيود في المانيفست (Python Engine)
+          # 4. التدمير الشامل لكل قيود المانيفست
           python3 -c "
           import xml.etree.ElementTree as ET
           ET.register_namespace('android', 'http://schemas.android.com/apk/res/android')
@@ -48,39 +59,59 @@ jobs:
           root = tree.getroot()
           ns = '{http://schemas.android.com/apk/res/android}'
           
-          # قائمة الأعداء (القيود)
+          # إزالة قيود التوافق والشاشات والعتاد
           forbidden_tags = ['compatible-screens', 'supports-gl-texture', 'uses-feature', 'uses-configuration', 'supports-screens']
           for tag in forbidden_tags:
               for elem in root.findall(tag):
                   root.remove(elem)
           
+          # حذف maxSdkVersion إن وجد
+          uses_sdk = root.find('uses-sdk')
+          if uses_sdk is not None and f'{ns}maxSdkVersion' in uses_sdk.attrib:
+              del uses_sdk.attrib[f'{ns}maxSdkVersion']
+          
           # حقن بيئة العمل الشاملة
           app = root.find('application')
-          app.set(f'{ns}extractNativeLibs', 'true')
-          app.set(f'{ns}multiArch', 'true')
-          app.set(f'{ns}largeHeap', 'true')
-          app.set(f'{ns}requestLegacyExternalStorage', 'true')
+          if app is not None:
+              app.set(f'{ns}extractNativeLibs', 'true')
+              app.set(f'{ns}multiArch', 'true')
+              app.set(f'{ns}largeHeap', 'true')
+              app.set(f'{ns}hardwareAccelerated', 'true')
+              app.set(f'{ns}requestLegacyExternalStorage', 'true')
+              app.set(f'{ns}preserveLegacyExternalStorage', 'true')
           
-          # حقن الصلاحيات
-          for perm in ['android.permission.READ_EXTERNAL_STORAGE', 'android.permission.WRITE_EXTERNAL_STORAGE', 'android.permission.MANAGE_EXTERNAL_STORAGE']:
-              ET.SubElement(root, 'uses-permission').set(f'{ns}name', perm)
+          # حقن الصلاحيات الشاملة
+          perms = [
+              'android.permission.READ_EXTERNAL_STORAGE',
+              'android.permission.WRITE_EXTERNAL_STORAGE',
+              'android.permission.MANAGE_EXTERNAL_STORAGE',
+              'android.permission.READ_MEDIA_IMAGES',
+              'android.permission.READ_MEDIA_VIDEO',
+              'android.permission.READ_MEDIA_AUDIO'
+          ]
+          existing = [p.get(f'{ns}name') for p in root.findall('uses-permission')]
+          for perm in perms:
+              if perm not in existing:
+                  elem = ET.SubElement(root, 'uses-permission')
+                  elem.set(f'{ns}name', perm)
           
-          # فتح جميع الأنشطة
+          # تصحيح exported الإلزامي لجميع المكونات
           for elem in root.findall('.//activity') + root.findall('.//service') + root.findall('.//receiver'):
-              elem.set(f'{ns}exported', 'true')
+              if elem.find('intent-filter') is not None:
+                  elem.set(f'{ns}exported', 'true')
           
           tree.write('decompiled/AndroidManifest.xml', encoding='utf-8', xml_declaration=True)
           "
 
-      - name: Rebuild and Sign
+      - name: Fast Rebuild and Sign
         run: |
           java -jar apktool.jar b decompiled -o unsigned.apk
           zipalign -v -p 4 unsigned.apk aligned.apk
           keytool -genkeypair -v -keystore release.keystore -storepass 123456 -keypass 123456 -alias releasekey -keyalg RSA -keysize 2048 -validity 10000 -dname 'CN=Android,O=Android,C=US'
           apksigner sign --ks release.keystore --ks-pass pass:123456 --key-pass pass:123456 --v1-signing-enabled true --v2-signing-enabled true --v3-signing-enabled true --out patched_final.apk aligned.apk
 
-      - name: Upload
+      - name: Upload Patched APK
         uses: actions/upload-artifact@v4
         with:
-          name: NUCLEAR_PATCHED_APP
+          name: Patched-App-Output
           path: patched_final.apk
