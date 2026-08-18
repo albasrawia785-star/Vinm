@@ -1,4 +1,4 @@
-concurrency: name: Patch APK Ultimate 64bit Bypass Hook
+name: Patch APK Ultimate 64bit Bypass Hook
 
 on:
   workflow_dispatch:
@@ -39,18 +39,17 @@ jobs:
         run: |
           TARGET_SDK="${{ github.event.inputs.target_sdk }}"
           
-          # 1. تحديث SDK وإعدادات البناء لتأكيد وضع التوافق
+          # 1. تحديث SDK وإعدادات البناء
           sed -i "s/targetSdkVersion:.*/targetSdkVersion: '$TARGET_SDK'/g" decompiled/apktool.yml
           sed -i "s/minSdkVersion:.*/minSdkVersion: '21'/g" decompiled/apktool.yml
           
-          # 2. حيلة المعمارية القصوى: نسخ المكتبات دون تغيير أسمائها إلى مجلد arm64 لإجبار المعالج
-          # على قبولها، مع الاعتماد على extractNativeLibs لإتاحة الوصول لها
+          # 2. مطابقة المعمارية للتثبيت
           if [ -d "decompiled/lib/armeabi-v7a" ] && [ ! -d "decompiled/lib/arm64-v8a" ]; then
             mkdir -p decompiled/lib/arm64-v8a
             cp -r decompiled/lib/armeabi-v7a/* decompiled/lib/arm64-v8a/ || true
           fi
 
-          # 3. تعديل AndroidManifest.xml: حقن طبقة الترجمة والأذونات الشاملة
+          # 3. تعديل AndroidManifest.xml وحقن الصلاحيات
           python3 -c "
           import xml.etree.ElementTree as ET
           ET.register_namespace('android', 'http://schemas.android.com/apk/res/android')
@@ -58,7 +57,6 @@ jobs:
           root = tree.getroot()
           ns = '{http://schemas.android.com/apk/res/android}'
           
-          # إضافة أذونات الوصول للتخزين الكامل لأندرويد 11 فما فوق
           perms = [
               'android.permission.READ_EXTERNAL_STORAGE',
               'android.permission.WRITE_EXTERNAL_STORAGE',
@@ -70,16 +68,12 @@ jobs:
           
           app = root.find('application')
           if app is not None:
-              # حقن طبقة المحاكاة: إجبار النظام على استخراج المكتبات الأصلية للوصول إليها كمترجم
               app.set(f'{ns}extractNativeLibs', 'true')
-              # تمكين وضع توافق الأجهزة ورفع قيود الذاكرة العشوائية
               app.set(f'{ns}requestLegacyExternalStorage', 'true')
               app.set(f'{ns}largeHeap', 'true')
               app.set(f'{ns}hardwareAccelerated', 'true')
-              # حيلة المترجم: تفعيل multiArch للسماح بتحميل المترجم
               app.set(f'{ns}multiArch', 'true')
           
-          # تصحيح exported الإلزامي لجميع المكونات
           for elem in root.findall('.//activity') + root.findall('.//service') + root.findall('.//receiver'):
               if elem.find('intent-filter') is not None:
                   elem.set(f'{ns}exported', 'true')
@@ -87,15 +81,10 @@ jobs:
           tree.write('decompiled/AndroidManifest.xml', encoding='utf-8', xml_declaration=True)
           "
 
-      - name: Rebuild & Sign APK (V1, V2, V3)
+      - name: Rebuild & Sign APK
         run: |
-          # إعادة البناء مع تجاهل موارد AAPT2 القديمة
           java -jar apktool.jar b decompiled -o unsigned.apk --use-aapt2
-          
-          # محاذاة 4-byte
           zipalign -v -p 4 unsigned.apk aligned.apk
-          
-          # إنشاء Keystore وهمي والتوقيع بجميع الأنماط
           keytool -genkey -v -keystore test.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname 'CN=Android,O=Android,C=US'
           apksigner sign --ks test.keystore --ks-pass pass:android --key-pass pass:android --v1-signing-enabled true --v2-signing-enabled true --v3-signing-enabled true --out patched_final.apk aligned.apk
 
