@@ -1,4 +1,4 @@
-name: Patch APK Ultimate 64bit Bypass Hook
+name: Patch APK Ultimate Fix
 
 on:
   workflow_dispatch:
@@ -14,6 +14,7 @@ on:
 jobs:
   patch:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -35,21 +36,21 @@ jobs:
           curl -L -o input.apk "${{ github.event.inputs.apk_url }}"
           java -jar apktool.jar d input.apk -o decompiled -f
 
-      - name: Inject ARM32-to-ARM64 Translation Hook
+      - name: Patch Native Libs & Permissions
         run: |
           TARGET_SDK="${{ github.event.inputs.target_sdk }}"
           
-          # 1. تحديث SDK وإعدادات البناء
+          # ضبط الـ SDK
           sed -i "s/targetSdkVersion:.*/targetSdkVersion: '$TARGET_SDK'/g" decompiled/apktool.yml
           sed -i "s/minSdkVersion:.*/minSdkVersion: '21'/g" decompiled/apktool.yml
           
-          # 2. مطابقة المعمارية للتثبيت
+          # معالجة مجلد المعمارية للتثبيت
           if [ -d "decompiled/lib/armeabi-v7a" ] && [ ! -d "decompiled/lib/arm64-v8a" ]; then
             mkdir -p decompiled/lib/arm64-v8a
             cp -r decompiled/lib/armeabi-v7a/* decompiled/lib/arm64-v8a/ || true
           fi
 
-          # 3. تعديل AndroidManifest.xml وحقن الصلاحيات
+          # تعديل Manifest وحقن الصلاحيات
           python3 -c "
           import xml.etree.ElementTree as ET
           ET.register_namespace('android', 'http://schemas.android.com/apk/res/android')
@@ -81,11 +82,16 @@ jobs:
           tree.write('decompiled/AndroidManifest.xml', encoding='utf-8', xml_declaration=True)
           "
 
-      - name: Rebuild & Sign APK
+      - name: Fast Rebuild & Sign APK
         run: |
-          java -jar apktool.jar b decompiled -o unsigned.apk --use-aapt2
+          # بناء سريع بالوضع الافتراضي
+          java -jar apktool.jar b decompiled -o unsigned.apk
+          
+          # محاذاة 4-byte
           zipalign -v -p 4 unsigned.apk aligned.apk
-          keytool -genkey -v -keystore test.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname 'CN=Android,O=Android,C=US'
+          
+          # توليد المفتاح والتوقيع بشكل مباشر
+          keytool -genkey -v -keystore test.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android,O=Android,C=US"
           apksigner sign --ks test.keystore --ks-pass pass:android --key-pass pass:android --v1-signing-enabled true --v2-signing-enabled true --v3-signing-enabled true --out patched_final.apk aligned.apk
 
       - name: Upload Patched APK
