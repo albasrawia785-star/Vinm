@@ -1,111 +1,86 @@
-name: Pure-APK ARM32-to-ARM64 In-Process Translation Injector
+name: Ultimate APK Nuclear Patch
 
 on:
   workflow_dispatch:
     inputs:
       apk_url:
-        description: 'Direct Download URL for the 32-bit Game APK'
+        description: 'Direct Download URL for APK'
         required: true
-      target_sdk:
-        description: 'Target SDK (e.g., 34 or 35)'
-        required: true
-        default: '34'
 
 jobs:
-  inject-translation-layer:
+  patch-everything:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
-      - name: Checkout Repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up JDK 17 & Environment
-        uses: actions/setup-java@v4
-        with:
-          distribution: 'temurin'
-          java-version: '17'
-
-      - name: Install Toolchain
+      - name: Prepare Environment
         run: |
           sudo apt-get update
           sudo apt-get install -y zipalign apksigner python3 patchelf
           curl -L -o apktool.jar "https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar"
 
-      - name: Download & Decompile APK
+      - name: Decompile
         run: |
-          curl -L -o target.apk "${{ github.event.inputs.apk_url }}"
-          java -jar apktool.jar d target.apk -o decompiled -f
+          curl -L -o input.apk "${{ github.event.inputs.apk_url }}"
+          java -jar apktool.jar d input.apk -o decompiled -f
 
-      - name: Patch Native Binaries & Inject 64-bit ABI Layer
+      - name: Nuclear De-restriction Script
         run: |
-          TARGET_SDK="${{ github.event.inputs.target_sdk }}"
+          # 1. تدمير وسوم القيود في الملفات النصية
+          sed -i '/maxSdkVersion/d' decompiled/apktool.yml
+          sed -i 's/minSdkVersion:.*/minSdkVersion: 21/g' decompiled/apktool.yml
+          sed -i 's/targetSdkVersion:.*/targetSdkVersion: 34/g' decompiled/apktool.yml
           
-          # 1. تحديث الـ SDK والتخلص من القيود
-          sed -i "s/targetSdkVersion:.*/targetSdkVersion: '$TARGET_SDK'/g" decompiled/apktool.yml
-          sed -i "s/minSdkVersion:.*/minSdkVersion: '21'/g" decompiled/apktool.yml
-          sed -i "/maxSdkVersion/d" decompiled/apktool.yml
-
-          # 2. إنشاء هيكل arm64-v8a وضبط مكتبات اللعبة الأصلية
+          # 2. مطابقة المعمارية لـ arm64-v8a
           mkdir -p decompiled/lib/arm64-v8a
+          cp -r decompiled/lib/armeabi-v7a/* decompiled/lib/arm64-v8a/ 2>/dev/null || true
           
-          # نقل مكتبات 32-bit لتكون متاحة لمشغل الذاكرة
-          for abi in armeabi-v7a armeabi x86; do
-            if [ -d "decompiled/lib/$abi" ]; then
-              cp -r decompiled/lib/$abi/* decompiled/lib/arm64-v8a/ 2>/dev/null || true
-            fi
-          done
-
-          # 3. إزالة علامات الأخطاء وحماية الذاكرة من مكتبات .so القديمة
+          # 3. تطهير الملفات الثنائية (الخطوة الأهم للـ Crash)
           find decompiled/lib/ -type f -name "*.so" -exec patchelf --clear-execstack {} + 2>/dev/null || true
 
-          # 4. تعديل المانيفست بالكامل للسماح بالتحميل الديناميكي وتجاوز الانهيار
+          # 4. التدمير الشامل لكل القيود في المانيفست (Python Engine)
           python3 -c "
           import xml.etree.ElementTree as ET
           ET.register_namespace('android', 'http://schemas.android.com/apk/res/android')
           tree = ET.parse('decompiled/AndroidManifest.xml')
           root = tree.getroot()
           ns = '{http://schemas.android.com/apk/res/android}'
-
-          # تنظيف القيود والشاشات
-          for tag in ['compatible-screens', 'supports-gl-texture']:
+          
+          # قائمة الأعداء (القيود)
+          forbidden_tags = ['compatible-screens', 'supports-gl-texture', 'uses-feature', 'uses-configuration', 'supports-screens']
+          for tag in forbidden_tags:
               for elem in root.findall(tag):
                   root.remove(elem)
-
-          # حقن صلاحيات التخزين الشاملة
-          for perm in ['android.permission.READ_EXTERNAL_STORAGE', 'android.permission.WRITE_EXTERNAL_STORAGE', 'android.permission.MANAGE_EXTERNAL_STORAGE']:
-              elem = ET.SubElement(root, 'uses-permission')
-              elem.set(f'{ns}name', perm)
-
-          # ضبط خيارات المحرك والذاكرة
+          
+          # حقن بيئة العمل الشاملة
           app = root.find('application')
-          if app is not None:
-              app.set(f'{ns}extractNativeLibs', 'true')
-              app.set(f'{ns}requestLegacyExternalStorage', 'true')
-              app.set(f'{ns}largeHeap', 'true')
-              app.set(f'{ns}hardwareAccelerated', 'true')
-              app.set(f'{ns}multiArch', 'true')
-
-          # تصحيح exported
+          app.set(f'{ns}extractNativeLibs', 'true')
+          app.set(f'{ns}multiArch', 'true')
+          app.set(f'{ns}largeHeap', 'true')
+          app.set(f'{ns}requestLegacyExternalStorage', 'true')
+          
+          # حقن الصلاحيات
+          for perm in ['android.permission.READ_EXTERNAL_STORAGE', 'android.permission.WRITE_EXTERNAL_STORAGE', 'android.permission.MANAGE_EXTERNAL_STORAGE']:
+              ET.SubElement(root, 'uses-permission').set(f'{ns}name', perm)
+          
+          # فتح جميع الأنشطة
           for elem in root.findall('.//activity') + root.findall('.//service') + root.findall('.//receiver'):
-              if elem.find('intent-filter') is not None:
-                  elem.set(f'{ns}exported', 'true')
-
+              elem.set(f'{ns}exported', 'true')
+          
           tree.write('decompiled/AndroidManifest.xml', encoding='utf-8', xml_declaration=True)
           "
 
-      - name: Rebuild, Align & Multi-Sign
+      - name: Rebuild and Sign
         run: |
           java -jar apktool.jar b decompiled -o unsigned.apk
           zipalign -v -p 4 unsigned.apk aligned.apk
-          
-          # توليد مفتاح التوقيع
-          keytool -genkeypair -v -keystore release.keystore -storepass 123456 -keypass 123456 -alias releasekey -keyalg RSA -keysize 2048 -validity 10000 -dname 'CN=Android,OU=App,O=Org,L=City,ST=State,C=US'
-          
-          # التوقيع بأنماط V1, V2, V3
-          apksigner sign --ks release.keystore --ks-pass pass:123456 --key-pass pass:123456 --v1-signing-enabled true --v2-signing-enabled true --v3-signing-enabled true --out standalone_patched_game.apk aligned.apk
+          keytool -genkeypair -v -keystore release.keystore -storepass 123456 -keypass 123456 -alias releasekey -keyalg RSA -keysize 2048 -validity 10000 -dname 'CN=Android,O=Android,C=US'
+          apksigner sign --ks release.keystore --ks-pass pass:123456 --key-pass pass:123456 --v1-signing-enabled true --v2-signing-enabled true --v3-signing-enabled true --out patched_final.apk aligned.apk
 
-      - name: Upload Output APK
+      - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: In-Process-Translated-Game
-          path: standalone_patched_game.apk
+          name: NUCLEAR_PATCHED_APP
+          path: patched_final.apk
